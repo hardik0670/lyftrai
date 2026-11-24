@@ -6,17 +6,20 @@ A React chat app with a FastAPI backend. SQLite stores each conversation, and Li
 
 | Service | URL |
 | --- | --- |
-| Frontend | Pending deployment. Local address is `http://localhost:3000`. |
-| Backend | Pending deployment. Local address is `http://localhost:8000`. |
+| Frontend | [lyftrai.vercel.app](https://lyftrai.vercel.app) |
+| Backend | [Backend URL](https://making-joseph-owns-drill.trycloudflare.com) · [Health check](https://making-joseph-owns-drill.trycloudflare.com/health) |
 
-### Deploy with Render and Vercel
+### Host the demo for free
 
-1. In Render, create a Blueprint from this GitHub repository. The included `render.yaml` configures one Docker web service on a paid Starter plan with a persistent disk mounted at `/data`. Enter the two comma-separated Gemini keys as `LLM_API_KEYS` in Render. Use `http://localhost:3000` for `ALLOWED_ORIGINS` until the Vercel production URL is available.
-2. Open `/health` on the Render URL and confirm it returns `200` with two configured keys and caching enabled.
-3. In Vercel, use the `lyftrai` project or import this repository into a new project. Set the framework preset to **Vite**, the root directory to `frontend`, and the output directory to `dist`. Set `VITE_API_URL` to the HTTPS Render URL before the production build.
-4. Set Render's `ALLOWED_ORIGINS` to the exact HTTPS Vercel production origin, without a trailing slash. Verify the public frontend can send a message and update the URLs table above.
+Vercel Hobby serves the frontend. Docker runs the API and persists its SQLite data in a separate volume from local development. A Cloudflare Quick Tunnel gives the API a public HTTPS address for the demo. Keep the computer awake, Docker running, and both public containers up while the demo is being reviewed.
 
-[Render persistent disks](https://render.com/docs/disks) · [Vite on Vercel](https://vercel.com/docs/frameworks/frontend/vite)
+1. Put the Gemini keys in the root `.env`. Set `PUBLIC_FRONTEND_URL` to the exact Vercel production origin, such as `https://lyftrai.vercel.app`, without a trailing slash.
+2. Run `docker compose --profile public up --build -d tunnel` to start the public API and tunnel. Use `docker compose logs tunnel` to find the `https://...trycloudflare.com` address. Open `/health` at that address.
+3. In Vercel, use the **Vite** preset, `frontend` as the root directory, and `dist` as the output directory. Set the production `VITE_API_URL` to the tunnel's HTTPS address and deploy a fresh frontend build. Send a message from the deployed site to check the setup.
+
+A tunnel restart generates a new address. Update the backend link and Vercel's `VITE_API_URL`, then rebuild and redeploy the frontend. The SQLite volume persists when the containers restart.
+
+[Vercel Hobby](https://vercel.com/docs/plans/hobby) · [Cloudflare Quick Tunnels](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/)
 
 ## Run locally: with Docker and without
 
