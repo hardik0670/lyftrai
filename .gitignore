@@ -12,6 +12,3 @@ __pycache__/
 /data/
 node_modules/
 /frontend/dist/
-
-.vercel
-.env*
