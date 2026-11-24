@@ -6,38 +6,23 @@ from time import perf_counter
 from typing import Annotated, Literal
 from weakref import WeakValueDictionary
 
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import UUID4, BaseModel, StringConstraints, field_validator
+from pydantic import BaseModel, StringConstraints, field_validator
 
 from .config import Settings, read_settings
 from .db import Database
-from .gateway import (
-    Gateway,
-    ProvidersUnavailable,
-    SearchResult,
-    SearchSourcesUnavailable,
-    SearchUnavailable,
-    parse_simulated_failures,
-)
+from .gateway import Gateway, ProvidersUnavailable, parse_simulated_failures
 
 DEFAULT_PROMPT = "You are a helpful assistant. Answer clearly and concisely."
 logger = logging.getLogger(__name__)
-
-
-class TemporaryMessage(BaseModel):
-    role: Literal["user", "assistant"]
-    content: str
 
 
 class ChatRequest(BaseModel):
     session_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
     message: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
     system_prompt: str | None = None
-    temporary_history: list[TemporaryMessage] | None = None
-    search: bool = False
-    search_context: Annotated[str, StringConstraints(max_length=4000)] | None = None
 
     @field_validator("session_id")
     @classmethod
@@ -61,7 +46,6 @@ class ChatResponse(BaseModel):
     session_id: str
     reply: str
     metadata: ReplyMetadata
-    search: SearchResult | None = None
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -86,7 +70,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.allowed_origins),
-        allow_methods=["GET", "POST", "DELETE"],
+        allow_methods=["GET", "POST"],
         allow_headers=["Content-Type", "X-Simulate-Failure"],
     )
 
@@ -106,10 +90,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=503, detail="key pool not configured")
         return {"status": "ok", "keys_configured": len(settings.api_keys), "cache_enabled": True}
 
-    @app.post("/chat", response_model=ChatResponse, response_model_exclude_unset=True)
+    @app.post("/chat", response_model=ChatResponse)
     async def chat(
         request: ChatRequest,
-        response_headers: Response,
         simulate_failure: Annotated[str | None, Header(alias="X-Simulate-Failure")] = None,
     ):
         started_at = perf_counter()
@@ -123,22 +106,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if gateway is None:
             raise HTTPException(status_code=503, detail="all providers unavailable")
 
-        async def resolve_reply(prompt: str, history: list[dict], *, use_cache: bool = True):
+        lock = session_locks.setdefault(request.session_id, asyncio.Lock())
+        async with lock:
+            saved_prompt, history = database.load_session(request.session_id)
+            prompt = request.system_prompt if request.system_prompt is not None else saved_prompt
+            if prompt is None:
+                prompt = DEFAULT_PROMPT
+
             messages = [{"role": "system", "content": prompt}]
             messages.extend({"role": item["role"], "content": item["content"]} for item in history)
-            question = request.message
-            if request.search_context and not request.search:
-                question = f"Previous lookup request: {request.search_context}\n\nCurrent question: {question}"
-            messages.append({"role": "user", "content": question})
+            messages.append({"role": "user", "content": request.message})
 
             try:
-                answer = await gateway.answer(messages, failures, use_cache=use_cache, search=request.search)
-            except SearchSourcesUnavailable as error:
-                raise HTTPException(
-                    status_code=502, detail="Search returned no source links. Try a more specific query."
-                ) from error
-            except SearchUnavailable as error:
-                raise HTTPException(status_code=503, detail="Live search is temporarily unavailable.") from error
+                answer = await gateway.answer(messages, failures)
             except ProvidersUnavailable as error:
                 raise HTTPException(status_code=503, detail="all providers unavailable") from error
 
@@ -151,34 +131,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 key_id=answer.key_id,
                 fallback_attempts=answer.fallback_attempts,
             )
-            result = ChatResponse(session_id=request.session_id, reply=answer.reply, metadata=metadata)
-            if answer.search is not None:
-                response_headers.headers["Cache-Control"] = "no-store"
-                result.search = answer.search
-            return result
-
-        if request.search:
-            return await resolve_reply(DEFAULT_PROMPT, [], use_cache=False)
-
-        if request.temporary_history is not None:
-            # The browser sends previous turns only for temporary chats.
-            prompt = request.system_prompt if request.system_prompt is not None else DEFAULT_PROMPT
-            history = [item.model_dump() for item in request.temporary_history]
-            return await resolve_reply(prompt, history, use_cache=False)
-
-        lock = session_locks.setdefault(request.session_id, asyncio.Lock())
-        async with lock:
-            saved_prompt, history = database.load_session(request.session_id)
-            prompt = request.system_prompt if request.system_prompt is not None else saved_prompt
-            if prompt is None:
-                prompt = DEFAULT_PROMPT
-
-            response = await resolve_reply(prompt, history)
-            if response.search is None:
-                database.save_turn(
-                    request.session_id, prompt, request.message, response.reply, response.metadata.model_dump()
-                )
-            return response
+            database.save_turn(
+                request.session_id, prompt, request.message, answer.reply, metadata.model_dump()
+            )
+            return ChatResponse(session_id=request.session_id, reply=answer.reply, metadata=metadata)
 
     @app.get("/sessions/{session_id:path}/messages")
     async def session_messages(session_id: str):
@@ -186,16 +142,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if prompt is None:
             raise HTTPException(status_code=404, detail="session not found")
         return {"session_id": session_id, "messages": messages}
-
-    @app.delete("/sessions/{session_id}/messages", status_code=204)
-    async def delete_session(session_id: UUID4):
-        # Only browser-generated, unguessable session IDs are eligible for deletion.
-        identifier = str(session_id)
-        lock = session_locks.setdefault(identifier, asyncio.Lock())
-        async with lock:
-            if not database.delete_session(identifier):
-                raise HTTPException(status_code=404, detail="session not found")
-        return Response(status_code=204)
 
     return app
 

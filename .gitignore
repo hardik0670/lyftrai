@@ -1,5 +1,7 @@
 .env
-.env.local
+.env.*
+!.env.example
+.vercel/
 .venv/
 __pycache__/
 .pytest_cache/
@@ -10,3 +12,6 @@ __pycache__/
 /data/
 node_modules/
 /frontend/dist/
+
+.vercel
+.env*

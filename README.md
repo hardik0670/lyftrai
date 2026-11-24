@@ -9,9 +9,14 @@ A React chat app with a FastAPI backend. SQLite stores each conversation, and Li
 | Frontend | Pending deployment. Local address is `http://localhost:3000`. |
 | Backend | Pending deployment. Local address is `http://localhost:8000`. |
 
-For deployment, build the backend from the `backend` directory using its Dockerfile. Use one instance with a persistent disk mounted at `/data` and set `DATABASE_URL=sqlite:////data/app.db`. Put your keys in the host's environment settings and enable `ENABLE_FAILURE_SIMULATION=true` for the assignment.
+### Deploy with Render and Vercel
 
-Deploy the frontend as a static site. Set its root to `frontend`, build with `npm ci && npm run build`, and publish `dist`. Set `VITE_API_URL` to the public backend URL before building. Add the public frontend origin to the backend's `ALLOWED_ORIGINS`.
+1. In Render, create a Blueprint from this GitHub repository. The included `render.yaml` configures one Docker web service on a paid Starter plan with a persistent disk mounted at `/data`. Enter the two comma-separated Gemini keys as `LLM_API_KEYS` in Render. Use `http://localhost:3000` for `ALLOWED_ORIGINS` until the Vercel production URL is available.
+2. Open `/health` on the Render URL and confirm it returns `200` with two configured keys and caching enabled.
+3. In Vercel, use the `lyftrai` project or import this repository into a new project. Set the framework preset to **Vite**, the root directory to `frontend`, and the output directory to `dist`. Set `VITE_API_URL` to the HTTPS Render URL before the production build.
+4. Set Render's `ALLOWED_ORIGINS` to the exact HTTPS Vercel production origin, without a trailing slash. Verify the public frontend can send a message and update the URLs table above.
+
+[Render persistent disks](https://render.com/docs/disks) · [Vite on Vercel](https://vercel.com/docs/frameworks/frontend/vite)
 
 ## Run locally: with Docker and without
 
@@ -61,8 +66,8 @@ The backend code is split into `main.py` for the API, `gateway.py` for LiteLLM, 
 ## Verification: how to see failover, cache hits and per-message token usage
 
 1. Open `/health` on the backend. Check for `status: "ok"`, at least two configured keys, and `cache_enabled: true`.
-2. Send the same first message to `POST /chat` with two different session IDs. The response metadata should show `LIVE_INFERENCE` on the first call and `LLM_CACHE` on the second. The reply and token counts should match, and latency should be lower on the second call.
-3. In one chat, say `My dog is named Milo.` and then ask `What is my dog's name?`. The backend includes the previous turn. Use `GET /sessions/{session_id}/messages` to inspect the input and output token counts for each reply.
+2. In the UI, send a first message you haven't used before and check for `LIVE_INFERENCE`. Click **New chat** and send the exact same message. The second reply should show `LLM_CACHE`, the same text and token counts, and lower latency.
+3. In one chat, say `My dog is named Milo.` and then ask `What is my dog's name?`. The reply should use the previous turn. Input and output token counts are displayed beside each reply and returned by `GET /sessions/{session_id}/messages`.
 4. Run the PowerShell commands below against the backend to demonstrate failover and inspect the stored messages. Swap the URL for the public backend when recording the demo.
 
 ```powershell
@@ -86,12 +91,14 @@ Run the automated backend tests from the project root. They use a local test pro
 .\.venv\Scripts\python.exe -m pytest backend/tests
 ```
 
+### Demo recording
+
+Record a narrated 2–3 minute walkthrough using the public URLs. Show `/health`, a live reply and a follow-up in the frontend, then repeat the first prompt in a new chat to show the cache hit. Use the PowerShell commands above to show `POST /chat` failing over to `key_2` and `GET /sessions/{session_id}/messages` returning the saved exchange.
+
 ## Setup Used: your editor and AI tools
 
 Development used Windows PowerShell, Python 3.12, Node.js, and OpenAI Codex for planning, implementation, and verification.
 
 ## Bonus features (if any): what you added beyond the requirements and why
 
-The **New chat** button starts a fresh session without a page reload, which makes the cross-session cache demo easier.
-
-Send messages as usual. When a question needs current information, the chat model requests a lookup through `LLM_SEARCH_MODEL` and displays the source links. Search replies are available while the conversation is open. [Gemini Search grounding terms](https://aistudio.google.com/docs/terms#grounding-with-google-search)
+The **New chat** button starts a fresh session without a page reload, which makes the cross-session cache demo easier. The History sidebar lets you reopen recent conversations in the same browser. Reply text supports Markdown and has a copy button.

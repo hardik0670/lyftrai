@@ -3,10 +3,7 @@ from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from time import sleep
-from types import SimpleNamespace
-from uuid import uuid4
 
-import litellm
 import pytest
 from fastapi.testclient import TestClient
 
@@ -228,130 +225,11 @@ def test_history_survives_app_restart(settings):
         assert history.json()["messages"][0]["content"] == "Remember this."
 
 
-def test_temporary_chat_keeps_context_without_saving_or_caching(client, provider):
-    first = send(client, "temporary", "My name is Hale.", temporary_history=[]).json()
-    history = [
-        {"role": "user", "content": "My name is Hale."},
-        {"role": "assistant", "content": first["reply"]},
-    ]
-    follow_up = send(client, "temporary", "What is my name?", temporary_history=history)
-    assert follow_up.status_code == 200
-    assert provider[1][-1][1][1:3] == history
-    assert client.get("/sessions/temporary/messages").status_code == 404
-
-    regular = send(client, "regular", "My name is Hale.").json()
-    assert regular["metadata"]["resolution_source"] == "LIVE_INFERENCE"
-    repeated = send(client, "temporary", "My name is Hale.", temporary_history=[]).json()
-    assert repeated["metadata"]["resolution_source"] == "LIVE_INFERENCE"
-
-
-def test_history_delete_removes_only_selected_browser_session(client):
-    target = str(uuid4())
-    other = str(uuid4())
-    assert send(client, target, "Conversation to delete").status_code == 200
-    assert send(client, other, "Conversation to keep").status_code == 200
-
-    path = f"/sessions/{target}/messages"
-    origin = "http://localhost:3000"
-    preflight = client.options(path, headers={
-        "Origin": origin,
-        "Access-Control-Request-Method": "DELETE",
-    })
-    assert preflight.status_code == 200
-    deletion = client.delete(path, headers={"Origin": origin})
-    assert deletion.status_code == 204
-    assert deletion.headers["access-control-allow-origin"] == origin
-    assert client.get(path).status_code == 404
-    assert client.delete(path).status_code == 404
-    assert client.get(f"/sessions/{other}/messages").status_code == 200
-    assert client.delete("/sessions/guessable/messages").status_code == 422
-
-
-def test_search_returns_live_sources_without_saving_or_caching(settings, monkeypatch):
-    regular_completion = litellm.Router.acompletion
-    search_queries = []
-
-    def reply(content, *, tool_calls=None):
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=tool_calls))],
-            model="gpt-4o-mini",
-            usage=SimpleNamespace(prompt_tokens=25, completion_tokens=8),
-            _hidden_params={"model_id": "key_1"},
-        )
-
-    async def completion(router, **request):
-        question = request["messages"][-1]["content"]
-        if request["model"] != "live-search":
-            assert request["tools"][0]["function"]["name"] == "lookup_web"
-            if question == "What's the weather?":
-                return reply("Which city or postal code should I check?")
-            if question == "Mumbai" or question.startswith("Previous lookup request:"):
-                query = "Current weather in Mumbai?" if question == "Mumbai" else "Tomorrow's weather in Mumbai?"
-                return reply(None, tool_calls=[SimpleNamespace(function=SimpleNamespace(
-                    name="lookup_web", arguments=json.dumps({"query": query})
-                ))])
-            return await regular_completion(router, **request)
-        assert request["tools"] == [{"googleSearch": {}}]
-        assert len(request["messages"]) == 2
-        query = question
-        search_queries.append(query)
-        chunks = [] if query == "No sources" else [
-            {"web": {"title": "Weather service", "uri": "https://weather.example/forecast"}},
-            {"web": {"title": "Ignored", "uri": "javascript:example"}},
-        ]
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="Sunny in Mumbai."))],
-            model="gemini-2.5-flash-lite",
-            usage=SimpleNamespace(prompt_tokens=33, completion_tokens=8),
-            _hidden_params={
-                "model_id": "search:key_1",
-                "vertex_ai_grounding_metadata": [{
-                    "groundingChunks": chunks,
-                    "searchEntryPoint": {"renderedContent": "<div>Google Search</div>"},
-                }],
-            },
-        )
-
-    monkeypatch.setattr(litellm.Router, "acompletion", completion)
-    settings = replace(settings, search_model="gemini/gemini-2.5-flash-lite")
-    with TestClient(create_app(settings)) as client:
-        session_id = str(uuid4())
-        question = "Current weather in Mumbai?"
-        assert send(client, session_id, "Remember this").status_code == 200
-        history_path = f"/sessions/{session_id}/messages"
-        initial = client.get(history_path).json()
-
-        first = send(client, session_id, question, search=True)
-        again = send(client, session_id, question, search=True)
-        assert first.status_code == again.status_code == 200
-        assert first.headers["cache-control"] == "no-store"
-        assert first.json()["search"] == {
-            "sources": [{"title": "Weather service", "url": "https://weather.example/forecast"}],
-            "suggestions_html": "<div>Google Search</div>",
-            "query": question,
-        }
-        assert again.json()["metadata"]["resolution_source"] == "LIVE_INFERENCE"
-        assert first.json()["metadata"]["model"] == "gemini/gemini-2.5-flash-lite"
-        assert client.get(history_path).json() == initial
-
-        no_sources = send(client, session_id, "No sources", search=True)
-        assert no_sources.status_code == 502
-        assert "no source links" in no_sources.json()["detail"]
-        assert search_queries == [question, question, "No sources"]
-
-        clarification = send(client, session_id, "What's the weather?")
-        assert clarification.json()["reply"] == "Which city or postal code should I check?"
-        assert "search" not in clarification.json()
-        assert search_queries == [question, question, "No sources"]
-        saved = client.get(history_path).json()
-        automatic = send(client, session_id, "Mumbai")
-        assert automatic.status_code == 200
-        assert automatic.headers["cache-control"] == "no-store"
-        assert automatic.json()["search"]["query"] == question
-        follow_up = send(client, session_id, "And tomorrow?", search_context=question)
-        assert follow_up.json()["search"]["query"] == "Tomorrow's weather in Mumbai?"
-        assert client.get(history_path).json() == saved
-
-        normal = send(client, str(uuid4()), "Remember this")
-        assert "search" not in normal.json()
-        assert normal.json()["metadata"]["resolution_source"] == "LLM_CACHE"
+def test_api_exposes_only_assignment_routes(settings):
+    app = create_app(settings)
+    routes = {(method, route.path_format) for route in app.routes for method in route.methods}
+    assert routes == {
+        ("GET", "/health"),
+        ("POST", "/chat"),
+        ("GET", "/sessions/{session_id}/messages"),
+    }

@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import Markdown from "react-markdown";
-import SearchSources from "./SearchSources";
 import "./styles.css";
 
 const apiUrl = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/$/, "");
@@ -11,8 +10,8 @@ const historyLimit = 7;
 const welcomePrompts = [
   "What would you like to ask?",
   "Explain a concept simply.",
-  "What’s the weather in Mumbai?",
-  "What are today’s world headlines?",
+  "Help me write an email.",
+  "Summarize a piece of text.",
 ];
 const messageLabels = { user: "You", assistant: "Assistant", error: "Message failed" };
 
@@ -91,10 +90,21 @@ function WelcomeHeading({ prompts }) {
 }
 
 function errorMessage(status, detail) {
-  if (status === 503 && detail === "Live search is temporarily unavailable.") return detail;
   if (status === 503) return "The chat service is temporarily unavailable. Try again in a moment.";
   if (status === 422) return "Check that your message is between 1 and 4,000 characters.";
   return typeof detail === "string" ? detail : "Something went wrong. Try sending your message again.";
+}
+
+function ReplyMetadata({ metadata }) {
+  return (
+    <dl className="reply-metadata">
+      <div><dt>Source</dt><dd data-testid="meta-source">{metadata.resolution_source}</dd></div>
+      <div><dt>Model</dt><dd data-testid="meta-model">{metadata.model}</dd></div>
+      <div><dt>Latency</dt><dd data-testid="meta-latency">{metadata.latency_ms} ms</dd></div>
+      <div><dt>Input tokens</dt><dd data-testid="meta-input-tokens">{metadata.input_tokens}</dd></div>
+      <div><dt>Output tokens</dt><dd data-testid="meta-output-tokens">{metadata.output_tokens}</dd></div>
+    </dl>
+  );
 }
 
 function CopyReply({ reply }) {
@@ -116,7 +126,7 @@ function CopyReply({ reply }) {
   );
 }
 
-function ChatHistory({ chats, activeId, busy, error, onOpen, onDelete }) {
+function ChatHistory({ chats, activeId, busy, error, onOpen, onRemove }) {
   const [expanded, setExpanded] = useState(false);
   const [menuId, setMenuId] = useState(null);
 
@@ -167,9 +177,12 @@ function ChatHistory({ chats, activeId, busy, error, onOpen, onDelete }) {
                     className="history-delete"
                     type="button"
                     disabled={busy}
-                    onClick={() => onDelete(chat.id)}
+                    onClick={() => {
+                      onRemove(chat.id);
+                      setMenuId(null);
+                    }}
                   >
-                    Delete chat
+                    Remove from history
                   </button>
                 </div>
               )}
@@ -183,17 +196,15 @@ function ChatHistory({ chats, activeId, busy, error, onOpen, onDelete }) {
 
 function App() {
   const [sessionId, setSessionId] = useState(() => crypto.randomUUID());
-  const [temporary, setTemporary] = useState(false);
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [history, setHistory] = useState(readHistory);
-  const [historyAction, setHistoryAction] = useState(null);
+  const [loadingHistory, setLoadingHistory] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const input = useRef(null);
   const thread = useRef(null);
-  const loadingHistory = historyAction === "opening";
-  const busy = sending || historyAction !== null;
+  const busy = sending || loadingHistory;
 
   useEffect(() => {
     thread.current.scrollTop = thread.current.scrollHeight;
@@ -207,9 +218,8 @@ function App() {
     }
   }, [history]);
 
-  function resetChat(isTemporary = false) {
+  function resetChat() {
     setSessionId(crypto.randomUUID());
-    setTemporary(isTemporary);
     setMessages([]);
     setDraft("");
     setHistoryError("");
@@ -220,7 +230,7 @@ function App() {
     if (id === sessionId) return true;
     if (busy) return false;
     setHistoryError("");
-    setHistoryAction("opening");
+    setLoadingHistory(true);
     try {
       const response = await fetch(`${apiUrl}/sessions/${encodeURIComponent(id)}/messages`);
       if (response.status === 404) {
@@ -232,7 +242,6 @@ function App() {
       const body = await response.json();
       if (!Array.isArray(body.messages)) throw new Error("Invalid conversation.");
       setSessionId(id);
-      setTemporary(false);
       setMessages(body.messages);
       setDraft("");
       return true;
@@ -240,45 +249,19 @@ function App() {
       setHistoryError("Could not load this conversation. Try again.");
       return false;
     } finally {
-      setHistoryAction(null);
+      setLoadingHistory(false);
     }
   }
 
-  async function deleteHistory(id) {
-    if (busy || !window.confirm("Delete this chat and its messages?")) return;
-    setHistoryError("");
-    setHistoryAction("deleting");
-    try {
-      const response = await fetch(`${apiUrl}/sessions/${encodeURIComponent(id)}/messages`, {
-        method: "DELETE",
-      });
-      if (!response.ok && response.status !== 404) throw new Error("Could not delete conversation.");
-      setHistory((previous) => previous.filter((chat) => chat.id !== id));
-      if (id === sessionId) resetChat();
-    } catch {
-      setHistoryError("Could not delete this conversation. Try again.");
-    } finally {
-      setHistoryAction(null);
-    }
+  function removeHistory(id) {
+    setHistory((previous) => previous.filter((chat) => chat.id !== id));
+    if (id === sessionId) resetChat();
   }
 
   async function sendMessage(event) {
     event.preventDefault();
     const message = draft.trim();
     if (!message || busy) return;
-
-    const requestBody = { session_id: sessionId, message };
-    const previousLookup = messages.findLast((item) => item.role === "assistant")?.search?.query;
-    if (previousLookup) requestBody.search_context = previousLookup;
-    if (temporary) {
-      requestBody.temporary_history = messages
-        .filter((item, index) => {
-          if (item.role === "assistant") return !item.search;
-          const reply = messages[index + 1];
-          return item.role === "user" && reply?.role === "assistant" && !reply.search;
-        })
-        .map(({ role, content }) => ({ role, content }));
-    }
 
     setDraft("");
     setSending(true);
@@ -288,24 +271,22 @@ function App() {
       const response = await fetch(`${apiUrl}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
+        body: JSON.stringify({ session_id: sessionId, message }),
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(errorMessage(response.status, body.detail));
-      if (!body.reply) throw new Error("The server returned an incomplete reply.");
+      if (!body.reply || !body.metadata) throw new Error("The server returned an incomplete reply.");
 
       setMessages((previous) => [
         ...previous,
-        { role: "assistant", content: body.reply, search: body.search },
+        { role: "assistant", content: body.reply, metadata: body.metadata },
       ]);
-      if (!temporary && !body.search) {
-        setHistory((previous) => {
-          const existing = previous.find((chat) => chat.id === sessionId);
-          const title = message.replace(/\s+/g, " ").slice(0, 80);
-          return [existing ?? { id: sessionId, title }, ...previous.filter((chat) => chat.id !== sessionId)]
-            .slice(0, historyLimit);
-        });
-      }
+      setHistory((previous) => {
+        const existing = previous.find((chat) => chat.id === sessionId);
+        const title = message.replace(/\s+/g, " ").slice(0, 80);
+        return [existing ?? { id: sessionId, title }, ...previous.filter((chat) => chat.id !== sessionId)]
+          .slice(0, historyLimit);
+      });
     } catch (error) {
       const content = error instanceof TypeError
         ? "Could not reach the chat server. Try again in a moment."
@@ -325,18 +306,9 @@ function App() {
           <a href="mailto:khatrihardik148@gmail.com">khatrihardik148@gmail.com</a>
         </div>
         <div className="header-actions">
-          <button className="new-chat" type="button" onClick={() => resetChat()} disabled={busy}>
+          <button className="new-chat" type="button" onClick={resetChat} disabled={busy}>
             <span aria-hidden="true">+</span>
             New chat
-          </button>
-          <button
-            className="temporary-chat"
-            type="button"
-            aria-pressed={temporary}
-            onClick={() => resetChat(!temporary)}
-            disabled={busy}
-          >
-            Temporary chat
           </button>
         </div>
       </header>
@@ -348,10 +320,9 @@ function App() {
           busy={busy}
           error={historyError}
           onOpen={openHistory}
-          onDelete={deleteHistory}
+          onRemove={removeHistory}
         />
         <main className="chat" aria-label="Chat">
-          {temporary && <p className="temporary-note">This chat won’t appear in your history.</p>}
           <div className="thread" ref={thread} role="log" aria-label="Conversation" aria-busy={loadingHistory}>
             {messages.length === 0 && !loadingHistory && (
               <WelcomeHeading prompts={welcomePrompts} />
@@ -374,7 +345,7 @@ function App() {
                 ) : (
                   <p className="message-text">{message.content}</p>
                 )}
-                {message.search && <SearchSources result={message.search} />}
+                {message.metadata && <ReplyMetadata metadata={message.metadata} />}
               </article>
             ))}
             {sending && (

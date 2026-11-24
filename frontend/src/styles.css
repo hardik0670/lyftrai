@@ -86,11 +86,6 @@ button:disabled { cursor: default; }
 .header-actions button:hover:enabled { background: #f0e5ff; }
 .header-actions button:disabled { opacity: 0.55; }
 
-.temporary-chat[aria-pressed="true"] {
-  border-color: #b990e7;
-  background: #ecddff;
-}
-
 .workspace {
   flex: 1;
   min-height: 0;
@@ -211,15 +206,6 @@ button:disabled { cursor: default; }
   box-shadow: 0 12px 34px #5225890f;
 }
 
-.temporary-note {
-  margin: 0;
-  padding: 9px 16px;
-  border-bottom: 1px solid var(--border);
-  color: var(--muted);
-  font-size: 0.82rem;
-  text-align: center;
-}
-
 .thread {
   flex: 1;
   min-height: 0;
@@ -325,17 +311,19 @@ button:disabled { cursor: default; }
 .reply-text pre { padding: 9px; overflow: auto; }
 .reply-text :not(pre) > code { padding: 0.1em 0.24em; }
 
-.search-sources {
-  margin-top: 12px;
+.reply-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 14px;
+  margin: 12px 0 0;
   padding-top: 9px;
   border-top: 1px solid var(--border);
-  font-size: 0.82rem;
+  font-size: 0.74rem;
 }
 
-.search-sources h3 { margin: 0; font-size: inherit; }
-.search-sources ul { margin: 4px 0 0; padding-inline-start: 1.25rem; }
-.search-sources a { color: var(--accent-dark); }
-.search-suggestions { margin-top: 7px; }
+.reply-metadata dt { color: var(--muted); }
+.reply-metadata dd { margin: 1px 0 0; font-weight: 650; }
+.reply-metadata [data-testid="meta-source"] { color: var(--accent-dark); }
 
 .message.user {
   align-self: flex-end;

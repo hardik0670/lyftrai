@@ -77,9 +77,3 @@ class Database:
                     (session_id, "assistant", reply, json.dumps(metadata), created_at),
                 ],
             )
-
-    def delete_session(self, session_id: str) -> bool:
-        with self.connect() as connection, connection:
-            connection.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-            deleted = connection.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-            return deleted.rowcount == 1
