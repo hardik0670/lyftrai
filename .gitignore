@@ -1,0 +1,12 @@
+.env
+.env.local
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.db
+*.db-shm
+*.db-wal
+/data/
+node_modules/
+/frontend/dist/
